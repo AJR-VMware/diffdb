@@ -88,14 +88,15 @@ func getAndCompareTableList() []Table {
 }
 
 func compareData(baseFilePath string, testFilePath string) (bool) {
+	// TODO: make this smarter and faster so it doesn't need to read the whole table into memory at once
 	match := false
 	baseFileContents, err := os.ReadFile(baseFilePath)
 	if err != nil {
-		log.Fatalf("Could not read %s contents:%v", baseFilePath, err)
+		log.Fatalf("Could not read %s contents: %v", baseFilePath, err)
 	}
 	testFileContents, err := os.ReadFile(testFilePath)
 	if err != nil {
-		log.Fatalf("Could not read %s contents:%v", testFilePath, err)
+		log.Fatalf("Could not read %s contents: %v", testFilePath, err)
 	}
 
 	if bytes.Equal(baseFileContents, testFileContents){
@@ -133,11 +134,14 @@ func compareTables(tableList []Table, workingDir string) {
 
 		_, err = baseDBConnectionPool.Exec(copyOutBaseQuery, 1)
 		if err != nil {
-			log.Fatalf("Unable to copy out table %s.%s from basedb: %v", table.Schema, table.Name, err)
+			// TODO: this mostly only fires on external tables.  Explore options for those with the team
+			fmt.Printf("WARNING: Unable to copy out table %s.%s from basedb: %v\n", table.Schema, table.Name, err)
+			continue
 		}
 		_, err = testDBConnectionPool.Exec(copyOutTestQuery, 1)
 		if err != nil {
-			log.Fatalf("Unable to copy out table %s.%s from testdb: %v", table.Schema, table.Name, err)
+			fmt.Printf("WARNING: Unable to copy out table %s.%s from testdb: %v\n", table.Schema, table.Name, err)
+			continue
 		}
 
 		baseFileStat, err := os.Stat(baseFilePath)
