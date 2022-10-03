@@ -1,6 +1,7 @@
 package diffengine
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"os"
@@ -86,6 +87,23 @@ func getAndCompareTableList() []Table {
 	return baseDBTables
 }
 
+func compareData(baseFilePath string, testFilePath string) (bool) {
+	match := false
+	baseFileContents, err := os.ReadFile(baseFilePath)
+	if err != nil {
+		log.Fatalf("Could not read %s contents:%v", baseFilePath, err)
+	}
+	testFileContents, err := os.ReadFile(testFilePath)
+	if err != nil {
+		log.Fatalf("Could not read %s contents:%v", testFilePath, err)
+	}
+
+	if bytes.Equal(baseFileContents, testFileContents){
+		match = true
+	}
+	return match
+}
+
 func compareTables(tableList []Table, workingDir string) {
 	// iterate through list, copying data from both dbs and comparing.
 	// if a difference is found, either store or fail out depending on failfast flag
@@ -138,9 +156,10 @@ func compareTables(tableList []Table, workingDir string) {
 				baseFileStat.Size(),
 				testFileStat.Size())
 		}
+
+		if !compareData(baseFilePath, testFilePath){
+			log.Fatalf("Table %s.%s has a data mismatch\n", table.Schema, table.Name)
+		}
 		fmt.Printf("Table %s.%s matches: %d bytes\n", table.Schema, table.Name, baseFileStat.Size())
-
-		// TODO: compare actual byte values or hash to check these
-
 	}
 }
