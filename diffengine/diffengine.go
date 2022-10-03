@@ -15,6 +15,7 @@ var (
 
 	baseDBConnectionPool *dbconn.DBConn
 	testDBConnectionPool *dbconn.DBConn
+	mismatches []Mismatch
 )
 
 func initializeConnectionPools(baseDbName string, testDbName string) {
@@ -37,16 +38,38 @@ type Table struct {
 	Name   string
 }
 
-func DiffDB(baseDbName string, testDbName string, workingDir string, failFast bool) {
+type Mismatch struct {
+	TableName string
+	mismatchDesc string
+}
 
+func DiffDB(baseDbName string, testDbName string, workingDir string, failFast bool) {
 	// get db connection to basedb and testdb
 	initializeConnectionPools(baseDbName, testDbName)
 
-	tableList := getAndCompareTableList()
-	compareTables(tableList, workingDir)
+	tableList, foundMismatch := getAndCompareTableList()
+	if foundMismatch {
+		fmt.Printf("Database %s does not match database %s\n", baseDbName, testDbName)
+		for _, mism := range mismatches{
+			fmt.Printf("Table: %s --- mismatch: %s\n", mism.TableName, mism.mismatchDesc)
+		}
+		return
+	}
+	foundMismatch, matchedTables := compareTables(tableList, workingDir)
+
+	if foundMismatch {
+		fmt.Printf("Database %s does not match database %s\n", baseDbName, testDbName)
+		fmt.Printf("Found matched data for only %d of %d tables\n", matchedTables, len(tableList))
+		for _, mism := range mismatches{
+			fmt.Printf("Table: %s --- mismatch: %s\n", mism.TableName, mism.mismatchDesc)
+		}
+		return
+	}
+	fmt.Printf("Database %s matches database %s\n", baseDbName, testDbName)
 }
 
-func getAndCompareTableList() []Table {
+func getAndCompareTableList() ([]Table, bool) {
+	foundMismatch := false
 	// get list of tables from basedb
 	tableListQuery := `
 	SELECT 
@@ -76,15 +99,19 @@ func getAndCompareTableList() []Table {
 	testDBTableCount := len(testDBTables)
 
 	if baseDBTableCount != testDBTableCount {
-		log.Fatal(fmt.Errorf(
-			"data mismatches, found %d tables in basedb, %d tables in testdb",
+		foundMismatch = true
+		mismatchDesc := fmt.Sprintf(
+			"Found %d tables in basedb, %d tables in testdb",
 			baseDBTableCount,
-			testDBTableCount),
-			"")
+			testDBTableCount)
+
+		mismatchStruct := Mismatch{"Table Count", mismatchDesc}
+		mismatches = append(mismatches, mismatchStruct)
+		return baseDBTables, foundMismatch
 	}
 
 	// if list doesn't match, fail out
-	return baseDBTables
+	return baseDBTables, foundMismatch
 }
 
 func compareData(baseFilePath string, testFilePath string) (bool) {
@@ -105,42 +132,41 @@ func compareData(baseFilePath string, testFilePath string) (bool) {
 	return match
 }
 
-func compareTables(tableList []Table, workingDir string) {
-	// iterate through list, copying data from both dbs and comparing.
-	// if a difference is found, either store or fail out depending on failfast flag
+func compareTables(tableList []Table, workingDir string) (bool, int) {
+	foundMismatch := false
+	matchedTables := 0
 
 	for _, table := range tableList {
 		reInitDir()
 		baseFilePath := fmt.Sprintf(`%s_base_file.gz`, workingDir)
 		testFilePath := fmt.Sprintf(`%s_test_file.gz`, workingDir)
+		tableFQN := fmt.Sprintf("%s.%s", table.Schema, table.Name)
 		copyOutBaseQuery := fmt.Sprintf(`
-		COPY %s.%s
+		COPY %s
 		TO PROGRAM  'gzip -c -1 > %s' 
 		WITH CSV DELIMITER ',' 
 		IGNORE EXTERNAL PARTITIONS;`,
-			table.Schema,
-			table.Name,
+			tableFQN,
 			baseFilePath,
 		)
 		copyOutTestQuery := fmt.Sprintf(`
-		COPY %s.%s
+		COPY %s
 		TO PROGRAM  'gzip -c -1 > %s'
 		WITH CSV DELIMITER ',' 
 		IGNORE EXTERNAL PARTITIONS;`,
-			table.Schema,
-			table.Name,
+			tableFQN,
 			testFilePath,
 		)
 
 		_, err = baseDBConnectionPool.Exec(copyOutBaseQuery, 1)
 		if err != nil {
 			// TODO: this mostly only fires on external tables.  Explore options for those with the team
-			fmt.Printf("WARNING: Unable to copy out table %s.%s from basedb: %v\n", table.Schema, table.Name, err)
+			fmt.Printf("WARNING: Unable to copy out table %s from basedb: %v\n", tableFQN, err)
 			continue
 		}
 		_, err = testDBConnectionPool.Exec(copyOutTestQuery, 1)
 		if err != nil {
-			fmt.Printf("WARNING: Unable to copy out table %s.%s from testdb: %v\n", table.Schema, table.Name, err)
+			fmt.Printf("WARNING: Unable to copy out table %s from testdb: %v\n", tableFQN, err)
 			continue
 		}
 
@@ -154,16 +180,25 @@ func compareTables(tableList []Table, workingDir string) {
 		}
 
 		if baseFileStat.Size() != testFileStat.Size() {
-			log.Fatalf("Table %s.%s has %d bytes in baseFile and %d bytes in testFile",
-				table.Schema,
-				table.Name,
+			foundMismatch = true
+			mismatchDesc := fmt.Sprintf("Table %s has %d bytes in basedb and %d bytes in testdb",
+				tableFQN,
 				baseFileStat.Size(),
 				testFileStat.Size())
+			mismatchStruct := Mismatch{tableFQN, mismatchDesc}
+			mismatches = append(mismatches, mismatchStruct)
+			continue
 		}
 
 		if !compareData(baseFilePath, testFilePath){
-			log.Fatalf("Table %s.%s has a data mismatch\n", table.Schema, table.Name)
+			foundMismatch = true
+			mismatchDesc := fmt.Sprintf("Table %s has a data mismatch", tableFQN)
+			mismatchStruct := Mismatch{tableFQN, mismatchDesc}
+			mismatches = append(mismatches, mismatchStruct)
+			continue
 		}
-		fmt.Printf("Table %s.%s matches: %d bytes\n", table.Schema, table.Name, baseFileStat.Size())
+		matchedTables += 1
+
 	}
+	return foundMismatch, matchedTables
 }
