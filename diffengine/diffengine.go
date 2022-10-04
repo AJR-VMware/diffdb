@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 
-	"github.com/AJR-VMware/diffdb/options"
 	"github.com/greenplum-db/gp-common-go-libs/dbconn"
 )
 
@@ -15,7 +14,7 @@ var (
 
 	baseDBConnectionPool *dbconn.DBConn
 	testDBConnectionPool *dbconn.DBConn
-	mismatches []Mismatch
+	mismatches           []Mismatch
 )
 
 func initializeConnectionPools(baseDbName string, testDbName string) {
@@ -25,42 +24,38 @@ func initializeConnectionPools(baseDbName string, testDbName string) {
 	testDBConnectionPool.MustConnect(2)
 }
 
-func reInitDir() {
-	os.RemoveAll(options.WORKING_DIR)
-	err := os.Mkdir(options.WORKING_DIR, 0744)
-	if err != nil {
-		log.Fatal(err, "Could not reinit working directory")
-	}
-}
-
 type Table struct {
 	Schema string
 	Name   string
 }
 
 type Mismatch struct {
-	TableName string
+	TableName    string
 	mismatchDesc string
 }
 
-func DiffDB(baseDbName string, testDbName string, workingDir string, failFast bool) {
+type RowCount struct {
+	rowCount int64
+}
+
+func DiffDB(baseDbName string, testDbName string, failFast bool) {
 	// get db connection to basedb and testdb
 	initializeConnectionPools(baseDbName, testDbName)
 
 	tableList, foundMismatch := getAndCompareTableList()
 	if foundMismatch {
 		fmt.Printf("Database %s does not match database %s\n", baseDbName, testDbName)
-		for _, mism := range mismatches{
+		for _, mism := range mismatches {
 			fmt.Printf("Table: %s --- mismatch: %s\n", mism.TableName, mism.mismatchDesc)
 		}
 		return
 	}
-	foundMismatch, matchedTables := compareTables(tableList, workingDir)
+	foundMismatch, matchedTables := compareRowCounts(tableList)
 
 	if foundMismatch {
 		fmt.Printf("Database %s does not match database %s\n", baseDbName, testDbName)
 		fmt.Printf("Found matched data for only %d of %d tables\n", matchedTables, len(tableList))
-		for _, mism := range mismatches{
+		for _, mism := range mismatches {
 			fmt.Printf("Table: %s --- mismatch: %s\n", mism.TableName, mism.mismatchDesc)
 		}
 		return
@@ -114,7 +109,7 @@ func getAndCompareTableList() ([]Table, bool) {
 	return baseDBTables, foundMismatch
 }
 
-func compareData(baseFilePath string, testFilePath string) (bool) {
+func compareData(baseFilePath string, testFilePath string) bool {
 	// TODO: make this smarter and faster so it doesn't need to read the whole table into memory at once
 	match := false
 	baseFileContents, err := os.ReadFile(baseFilePath)
@@ -126,79 +121,51 @@ func compareData(baseFilePath string, testFilePath string) (bool) {
 		log.Fatalf("Could not read %s contents: %v", testFilePath, err)
 	}
 
-	if bytes.Equal(baseFileContents, testFileContents){
+	if bytes.Equal(baseFileContents, testFileContents) {
 		match = true
 	}
 	return match
 }
 
-func compareTables(tableList []Table, workingDir string) (bool, int) {
-	foundMismatch := false
+func compareRowCounts(tableList []Table) (bool, int) {
+	foundMisMatch := false
 	matchedTables := 0
 
 	for _, table := range tableList {
-		reInitDir()
-		baseFilePath := fmt.Sprintf(`%s_base_file.gz`, workingDir)
-		testFilePath := fmt.Sprintf(`%s_test_file.gz`, workingDir)
+		testRowCounts := make([]int64, 0)
+		baseRowCounts := make([]int64, 0)
 		tableFQN := fmt.Sprintf("%s.%s", table.Schema, table.Name)
-		copyOutBaseQuery := fmt.Sprintf(`
-		COPY %s
-		TO PROGRAM  'gzip -c -1 > %s' 
-		WITH CSV DELIMITER ',' 
-		IGNORE EXTERNAL PARTITIONS;`,
-			tableFQN,
-			baseFilePath,
-		)
-		copyOutTestQuery := fmt.Sprintf(`
-		COPY %s
-		TO PROGRAM  'gzip -c -1 > %s'
-		WITH CSV DELIMITER ',' 
-		IGNORE EXTERNAL PARTITIONS;`,
-			tableFQN,
-			testFilePath,
-		)
+		rowCountQuery := fmt.Sprintf("SELECT count(*) as rowCount FROM %s", tableFQN)
 
-		_, err = baseDBConnectionPool.Exec(copyOutBaseQuery, 1)
+		err = testDBConnectionPool.Select(&testRowCounts, rowCountQuery)
 		if err != nil {
 			// TODO: this mostly only fires on external tables.  Explore options for those with the team
-			fmt.Printf("WARNING: Unable to copy out table %s from basedb: %v\n", tableFQN, err)
+			fmt.Printf("WARNING: Unable to select rowcount of table %s from testdb: %v\n", tableFQN, err)
 			continue
 		}
-		_, err = testDBConnectionPool.Exec(copyOutTestQuery, 1)
+		testRowCount := testRowCounts[0]
+
+		err = baseDBConnectionPool.Select(&baseRowCounts, rowCountQuery)
 		if err != nil {
-			fmt.Printf("WARNING: Unable to copy out table %s from testdb: %v\n", tableFQN, err)
+			// TODO: this mostly only fires on external tables.  Explore options for those with the team
+			fmt.Printf("WARNING: Unable to select rowcount of table %s from basedb: %v\n", tableFQN, err)
 			continue
 		}
+		baseRowCount := baseRowCounts[0]
 
-		baseFileStat, err := os.Stat(baseFilePath)
-		if err != nil {
-			log.Fatalf("Unable to stat file %s: %v", baseFilePath, err)
-		}
-		testFileStat, err := os.Stat(testFilePath)
-		if err != nil {
-			log.Fatalf("Unable to stat file %s: %v", testFilePath, err)
-		}
-
-		if baseFileStat.Size() != testFileStat.Size() {
-			foundMismatch = true
+		if testRowCount != baseRowCount {
 			mismatchDesc := fmt.Sprintf("Table %s has %d bytes in basedb and %d bytes in testdb",
 				tableFQN,
-				baseFileStat.Size(),
-				testFileStat.Size())
+				baseRowCount,
+				testRowCount)
 			mismatchStruct := Mismatch{tableFQN, mismatchDesc}
 			mismatches = append(mismatches, mismatchStruct)
 			continue
 		}
 
-		if !compareData(baseFilePath, testFilePath){
-			foundMismatch = true
-			mismatchDesc := fmt.Sprintf("Table %s has a data mismatch", tableFQN)
-			mismatchStruct := Mismatch{tableFQN, mismatchDesc}
-			mismatches = append(mismatches, mismatchStruct)
-			continue
-		}
+		// table rowcounts matched successfully
 		matchedTables += 1
-
 	}
-	return foundMismatch, matchedTables
+
+	return foundMisMatch, matchedTables
 }
