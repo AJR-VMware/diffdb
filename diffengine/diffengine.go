@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/greenplum-db/gp-common-go-libs/dbconn"
 )
@@ -134,7 +135,7 @@ func compareRowCounts(tableList []Table) (bool, int) {
 	for _, table := range tableList {
 		testRowCounts := make([]int64, 0)
 		baseRowCounts := make([]int64, 0)
-		tableFQN := fmt.Sprintf("%s.%s", table.Schema, table.Name)
+		tableFQN := fmt.Sprintf("quote_ident('%s.%s')", strings.ReplaceAll(table.Schema, "'", "''"), strings.ReplaceAll(table.Name, "'", "''"))
 		rowCountQuery := fmt.Sprintf("SELECT count(*) as rowCount FROM %s", tableFQN)
 
 		err = testDBConnectionPool.Select(&testRowCounts, rowCountQuery)
